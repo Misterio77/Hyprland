@@ -36,6 +36,7 @@
         version = "0.7.0beta" + "+date=" + (mkDate (self.lastModifiedDate or "19700101"));
         wlroots = wlroots-hyprland;
       };
+      hyprland-contrib = prev.callPackage ./nix/contrib.nix { inherit hyprland; };
       hyprland-debug = hyprland.override {debug = true;};
       waybar-hyprland = prev.waybar.overrideAttrs (oldAttrs: {
         mesonFlags = oldAttrs.mesonFlags ++ ["-Dexperimental=true"];

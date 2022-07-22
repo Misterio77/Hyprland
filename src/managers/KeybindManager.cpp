@@ -82,26 +82,79 @@ uint32_t CKeybindManager::stringToModMask(std::string mods) {
     return modMask;
 }
 
-bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const xkb_keysym_t& key, const int& keycode) {
+bool CKeybindManager::onKeyEvent(wlr_keyboard_key_event* e, SKeyboard* pKeyboard) {
+    const auto KEYCODE = e->keycode + 8;  // Because to xkbcommon it's +8 from libinput
+
+    const xkb_keysym_t keysym = xkb_state_key_get_one_sym(wlr_keyboard_from_input_device(pKeyboard->keyboard)->xkb_state, KEYCODE);
+
+    const auto MODS = g_pInputManager->accumulateModsFromAllKBs();
+
+
+    bool found = false;
+    if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        m_dPressedKeycodes.push_back(KEYCODE);
+        m_dPressedKeysyms.push_back(keysym);
+
+        found = g_pKeybindManager->handleKeybinds(MODS, "", keysym, 0, true, e->time_msec) || found;
+
+        found = g_pKeybindManager->handleKeybinds(MODS, "", 0, KEYCODE, true, e->time_msec) || found;
+    } else if (e->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+
+        m_dPressedKeycodes.erase(std::remove(m_dPressedKeycodes.begin(), m_dPressedKeycodes.end(), KEYCODE));
+        m_dPressedKeysyms.erase(std::remove(m_dPressedKeysyms.begin(), m_dPressedKeysyms.end(), keysym));
+
+        found = g_pKeybindManager->handleKeybinds(MODS, "", keysym, 0, false, e->time_msec) || found;
+
+        found = g_pKeybindManager->handleKeybinds(MODS, "", 0, KEYCODE, false, e->time_msec) || found;
+
+        shadowKeybinds();
+    }
+
+    return !found;
+}
+
+bool CKeybindManager::onAxisEvent(wlr_pointer_axis_event* e) {
+    const auto MODS = g_pInputManager->accumulateModsFromAllKBs();
+
+    bool found = false;
+    if (e->source == WLR_AXIS_SOURCE_WHEEL && e->orientation == WLR_AXIS_ORIENTATION_VERTICAL) {
+        if (e->delta < 0) { 
+            found = g_pKeybindManager->handleKeybinds(MODS, "mouse_down", 0, 0, true, 0);
+        } else {
+            found = g_pKeybindManager->handleKeybinds(MODS, "mouse_up", 0, 0, true, 0);
+        }
+    }
+
+    return !found;
+}
+
+bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const std::string& key, const xkb_keysym_t& keysym, const int& keycode, bool pressed, uint32_t time) {
     bool found = false;
 
-    if (handleInternalKeybinds(key))
+    if (handleInternalKeybinds(keysym))
         return true;
 
     if (g_pCompositor->m_sSeat.exclusiveClient)
         Debug::log(LOG, "Keybind handling only locked (inhibitor)");
 
+    if (pressed && m_kHeldBack) {
+        // release the held back event
+        wlr_seat_keyboard_notify_key(g_pCompositor->m_sSeat.seat, time, m_kHeldBack, WL_KEYBOARD_KEY_STATE_PRESSED);
+        m_kHeldBack = 0;
+    }
+
     for (auto& k : m_lKeybinds) {
-        if (modmask != k.modmask || (g_pCompositor->m_sSeat.exclusiveClient && !k.locked) || k.submap != m_szCurrentSelectedSubmap)
+        if (modmask != k.modmask || (g_pCompositor->m_sSeat.exclusiveClient && !k.locked) || k.submap != m_szCurrentSelectedSubmap || (!pressed && !k.release) || k.shadowed)
             continue;
 
-
-        if (k.keycode != -1) {
+        if (!key.empty()) {
+            if (key != k.key)
+                continue;
+        } else if (k.keycode != -1) {
             if (keycode != k.keycode)
                 continue;
-
         } else {
-            if (key == 0)
+            if (keysym == 0)
                 continue;  // this is a keycode check run
 
             // oMg such performance hit!!11!
@@ -110,8 +163,14 @@ bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const xkb_keysym_t
             const auto KBKEYUPPER = xkb_keysym_to_upper(KBKEY);
             // small TODO: fix 0-9 keys and other modified ones with shift
 
-            if (key != KBKEY && key != KBKEYUPPER)
+            if (keysym != KBKEY && keysym != KBKEYUPPER)
                 continue;
+        }
+
+        if (pressed && k.release) {
+            // suppress down event
+            m_kHeldBack = keysym;
+            return true;
         }
 
         const auto DISPATCHER = m_mDispatchers.find(k.handler);
@@ -121,14 +180,42 @@ bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const xkb_keysym_t
             Debug::log(ERR, "Inavlid handler in a keybind! (handler %s does not exist)", k.handler.c_str());
         } else {
             // call the dispatcher
-            Debug::log(LOG, "Keybind triggered, calling dispatcher (%d, %d)", modmask, key);
+            Debug::log(LOG, "Keybind triggered, calling dispatcher (%d, %s, %d)", modmask, key, keysym);
             DISPATCHER->second(k.arg);
         }
+
+        shadowKeybinds();
 
         found = true;
     }
 
     return found;
+}
+
+void CKeybindManager::shadowKeybinds() {
+    // shadow disables keybinds after one has been triggered
+
+    for (auto& k : m_lKeybinds) {
+
+        bool shadow = false;
+
+        const auto KBKEY = xkb_keysym_from_name(k.key.c_str(), XKB_KEYSYM_CASE_INSENSITIVE);
+        const auto KBKEYUPPER = xkb_keysym_to_upper(KBKEY);
+
+        for (auto& pk : m_dPressedKeysyms) {
+            if ((pk == KBKEY || pk == KBKEYUPPER)) {
+                shadow = true;
+            }
+        }
+
+        for (auto& pk : m_dPressedKeycodes) {
+            if (pk == (unsigned int)k.keycode) {
+                shadow = true;
+            }
+        }
+
+        k.shadowed = shadow;
+    }
 }
 
 bool CKeybindManager::handleVT(xkb_keysym_t keysym) {
@@ -230,7 +317,7 @@ void CKeybindManager::killActive(std::string args) {
         g_pXWaylandManager->sendCloseWindow(g_pCompositor->m_pLastWindow);
         g_pCompositor->m_pLastFocus = nullptr;
         g_pCompositor->m_pLastWindow = nullptr;
-        g_pEventManager->postEvent(SHyprIPCEvent("activewindow", ",")); // post an activewindow event to empty, as we are currently unfocused
+        g_pEventManager->postEvent(SHyprIPCEvent{"activewindow", ","}); // post an activewindow event to empty, as we are currently unfocused
     }
     
     g_pCompositor->focusWindow(g_pCompositor->windowFromCursor());
@@ -325,7 +412,7 @@ void CKeybindManager::changeworkspace(std::string args) {
             // start anim on new workspace
             PWORKSPACETOCHANGETO->startAnim(true, ANIMTOLEFT);
 
-            g_pEventManager->postEvent(SHyprIPCEvent("workspace", PWORKSPACETOCHANGETO->m_szName));
+            g_pEventManager->postEvent(SHyprIPCEvent{"workspace", PWORKSPACETOCHANGETO->m_szName});
         }
 
         // If the monitor is not the one our cursor's at, warp to it.
@@ -398,7 +485,7 @@ void CKeybindManager::changeworkspace(std::string args) {
     g_pInputManager->refocus();
 
     // Event
-    g_pEventManager->postEvent(SHyprIPCEvent("workspace", PWORKSPACE->m_szName));
+    g_pEventManager->postEvent(SHyprIPCEvent{"workspace", PWORKSPACE->m_szName});
 
     Debug::log(LOG, "Changed to workspace %i", workspaceToChangeTo);
 }

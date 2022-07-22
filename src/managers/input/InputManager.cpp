@@ -117,7 +117,7 @@ void CInputManager::mouseMoveUnified(uint32_t time, bool refocus) {
         ACTIVEWORKSPACE->setActive(true);
 
         // event
-        g_pEventManager->postEvent(SHyprIPCEvent("activemon", PMONITOR->szName + "," + ACTIVEWORKSPACE->m_szName));
+        g_pEventManager->postEvent(SHyprIPCEvent{"activemon", PMONITOR->szName + "," + ACTIVEWORKSPACE->m_szName});
     }
 
     Vector2D surfaceCoords;
@@ -381,6 +381,16 @@ void CInputManager::processMouseDownKill(wlr_pointer_button_event* e) {
     m_ecbClickBehavior = CLICKMODE_DEFAULT;
 }
 
+void CInputManager::onMouseWheel(wlr_pointer_axis_event* e) {
+    bool passEvent = g_pKeybindManager->onAxisEvent(e);
+
+    wlr_idle_notify_activity(g_pCompositor->m_sWLRIdle, g_pCompositor->m_sSeat.seat);
+
+    if (passEvent) {
+        wlr_seat_pointer_notify_axis(g_pCompositor->m_sSeat.seat, e->time_msec, e->orientation, e->delta, e->delta_discrete, e->source);
+    }
+}
+
 Vector2D CInputManager::getMouseCoordsInternal() {
     return Vector2D(g_pCompositor->m_sWLRCursor->x, g_pCompositor->m_sWLRCursor->y);
 }
@@ -629,26 +639,11 @@ void CInputManager::destroyMouse(wlr_input_device* mouse) {
 }
 
 void CInputManager::onKeyboardKey(wlr_keyboard_key_event* e, SKeyboard* pKeyboard) {
-    const auto KEYCODE = e->keycode + 8; // Because to xkbcommon it's +8 from libinput
-
-    const xkb_keysym_t* keysyms;
-    int syms = xkb_state_key_get_syms(wlr_keyboard_from_input_device(pKeyboard->keyboard)->xkb_state, KEYCODE, &keysyms);
-
-    const auto MODS = accumulateModsFromAllKBs();
+    bool passEvent = g_pKeybindManager->onKeyEvent(e, pKeyboard);
 
     wlr_idle_notify_activity(g_pCompositor->m_sWLRIdle, g_pCompositor->m_sSeat.seat);
 
-    bool found = false;
-    if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        for (int i = 0; i < syms; ++i)
-            found = g_pKeybindManager->handleKeybinds(MODS, keysyms[i], 0) || found;
-
-        found = g_pKeybindManager->handleKeybinds(MODS, 0, KEYCODE) || found;
-    } else if (e->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
-        // hee hee
-    }
-
-    if (!found) {
+    if (passEvent) {
         wlr_seat_set_keyboard(g_pCompositor->m_sSeat.seat, wlr_keyboard_from_input_device(pKeyboard->keyboard));
         wlr_seat_keyboard_notify_key(g_pCompositor->m_sSeat.seat, e->time_msec, e->keycode, e->state);
     }

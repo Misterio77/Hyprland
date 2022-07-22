@@ -506,9 +506,25 @@ void CConfigManager::handleAnimation(const std::string& command, const std::stri
     configSetValueSafe("animations:" + ANIMNAME + "_style", curitem);
 }
 
-void CConfigManager::handleBind(const std::string& command, const std::string& value, bool locked) {
+void CConfigManager::handleBind(const std::string& command, const std::string& value) {
     // example:
-    // bind=SUPER,G,exec,dmenu_run <args>
+    // bind[fl]=SUPER,G,exec,dmenu_run <args>
+
+    // flags
+    bool locked = false;
+    bool release = false;
+    const auto ARGS = command.substr(4);
+
+    for (auto& arg : ARGS) {
+        if (arg == 'l') {
+            locked = true;
+        } else if (arg == 'r') {
+            release = true;
+        } else {
+            parseError = "bind: invalid flag";
+            return;
+        }
+    }
 
     auto valueCopy = value;
 
@@ -540,9 +556,9 @@ void CConfigManager::handleBind(const std::string& command, const std::string& v
 
     if (KEY != "") {
         if (isNumber(KEY) && std::stoi(KEY) > 9)
-            g_pKeybindManager->addKeybind(SKeybind{"", std::stoi(KEY), MOD, HANDLER, COMMAND, locked, m_szCurrentSubmap});
+            g_pKeybindManager->addKeybind(SKeybind{"", std::stoi(KEY), MOD, HANDLER, COMMAND, locked, m_szCurrentSubmap, release});
         else
-            g_pKeybindManager->addKeybind(SKeybind{KEY, -1, MOD, HANDLER, COMMAND, locked, m_szCurrentSubmap});
+            g_pKeybindManager->addKeybind(SKeybind{KEY, -1, MOD, HANDLER, COMMAND, locked, m_szCurrentSubmap, release});
     }
         
 }
@@ -710,8 +726,7 @@ std::string CConfigManager::parseKeyword(const std::string& COMMAND, const std::
         }
     }
     else if (COMMAND == "monitor") handleMonitor(COMMAND, VALUE);
-    else if (COMMAND == "bind") handleBind(COMMAND, VALUE);
-    else if (COMMAND == "bindl") handleBind(COMMAND, VALUE, true);
+    else if (COMMAND.find("bind") == 0) handleBind(COMMAND, VALUE);
     else if (COMMAND == "unbind") handleUnbind(COMMAND, VALUE);
     else if (COMMAND == "workspace") handleDefaultWorkspace(COMMAND, VALUE);
     else if (COMMAND == "windowrule") handleWindowRule(COMMAND, VALUE);
@@ -1138,6 +1153,15 @@ void CConfigManager::dispatchExecOnce() {
     }
 
     firstExecRequests.clear(); // free some kb of memory :P
+
+    // set input, fixes some certain issues
+    g_pInputManager->setKeyboardLayout();
+    g_pInputManager->setMouseConfigs();
+
+    // set ws names again
+    for (auto& ws : g_pCompositor->m_vWorkspaces) {
+        wlr_ext_workspace_handle_v1_set_name(ws->m_pWlrHandle, ws->m_szName.c_str());
+    }
 }
 
 void CConfigManager::performMonitorReload() {

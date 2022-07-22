@@ -17,6 +17,7 @@ public:
     void            onMouseMoved(wlr_pointer_motion_event*);
     void            onMouseWarp(wlr_pointer_motion_absolute_event*);
     void            onMouseButton(wlr_pointer_button_event*);
+    void            onMouseWheel(wlr_pointer_axis_event*); 
     void            onKeyboardKey(wlr_keyboard_key_event*, SKeyboard*);
     void            onKeyboardMod(void*, SKeyboard*);
 
@@ -76,6 +77,9 @@ public:
 
     CTimer          m_tmrLastCursorMovement;
 
+    // for shared mods
+    uint32_t        accumulateModsFromAllKBs();
+
 private:
 
     // for click behavior override
@@ -92,9 +96,6 @@ private:
     STabletTool*    ensureTabletToolPresent(wlr_tablet_tool*);
 
     void            applyConfigToKeyboard(SKeyboard*);
-
-    // for shared mods
-    uint32_t        accumulateModsFromAllKBs();
 };
 
 inline std::unique_ptr<CInputManager> g_pInputManager;

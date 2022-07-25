@@ -37,6 +37,8 @@ CKeybindManager::CKeybindManager() {
 
 void CKeybindManager::addKeybind(SKeybind kb) {
     m_lKeybinds.push_back(kb);
+
+    m_pActiveKeybind = nullptr;
 }
 
 void CKeybindManager::removeKeybind(uint32_t mod, const std::string& key) {
@@ -58,6 +60,8 @@ void CKeybindManager::removeKeybind(uint32_t mod, const std::string& key) {
                 break;
         }
     }
+
+    m_pActiveKeybind = nullptr;
 }
 
 uint32_t CKeybindManager::stringToModMask(std::string mods) {
@@ -92,13 +96,29 @@ bool CKeybindManager::onKeyEvent(wlr_keyboard_key_event* e, SKeyboard* pKeyboard
 
     bool found = false;
     if (e->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        // clean repeat
+        if (m_pActiveKeybindEventSource) {
+            wl_event_source_remove(m_pActiveKeybindEventSource);
+            m_pActiveKeybindEventSource = nullptr;
+            m_pActiveKeybind = nullptr;
+        }
+
         m_dPressedKeycodes.push_back(KEYCODE);
         m_dPressedKeysyms.push_back(keysym);
 
         found = g_pKeybindManager->handleKeybinds(MODS, "", keysym, 0, true, e->time_msec) || found;
 
         found = g_pKeybindManager->handleKeybinds(MODS, "", 0, KEYCODE, true, e->time_msec) || found;
+
+        if (found)
+            shadowKeybinds(keysym, KEYCODE);
     } else if (e->state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        // clean repeat
+        if (m_pActiveKeybindEventSource) {
+            wl_event_source_remove(m_pActiveKeybindEventSource);
+            m_pActiveKeybindEventSource = nullptr;
+            m_pActiveKeybind = nullptr;
+        }
 
         m_dPressedKeycodes.erase(std::remove(m_dPressedKeycodes.begin(), m_dPressedKeycodes.end(), KEYCODE));
         m_dPressedKeysyms.erase(std::remove(m_dPressedKeysyms.begin(), m_dPressedKeysyms.end(), keysym));
@@ -126,6 +146,22 @@ bool CKeybindManager::onAxisEvent(wlr_pointer_axis_event* e) {
     }
 
     return !found;
+}
+
+int repeatKeyHandler(void* data) {
+    SKeybind** ppActiveKeybind = (SKeybind**)data;
+
+    if (!*ppActiveKeybind)
+        return 0;
+
+    const auto DISPATCHER = g_pKeybindManager->m_mDispatchers.find((*ppActiveKeybind)->handler);
+
+    Debug::log(LOG, "Keybind repeat triggered, calling dispatcher.");
+    DISPATCHER->second((*ppActiveKeybind)->arg);
+
+    wl_event_source_timer_update(g_pKeybindManager->m_pActiveKeybindEventSource, 1000 / g_pInputManager->m_pActiveKeyboard->repeatRate);
+
+    return 0;
 }
 
 bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const std::string& key, const xkb_keysym_t& keysym, const int& keycode, bool pressed, uint32_t time) {
@@ -184,7 +220,14 @@ bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const std::string&
             DISPATCHER->second(k.arg);
         }
 
-        shadowKeybinds();
+        if (k.repeat) {
+            m_pActiveKeybind = &k;
+            m_pActiveKeybindEventSource = wl_event_loop_add_timer(g_pCompositor->m_sWLEventLoop, repeatKeyHandler, &m_pActiveKeybind);
+
+            const auto PACTIVEKEEB = g_pInputManager->m_pActiveKeyboard;
+
+            wl_event_source_timer_update(m_pActiveKeybindEventSource, PACTIVEKEEB->repeatDelay);
+        }
 
         found = true;
     }
@@ -192,7 +235,7 @@ bool CKeybindManager::handleKeybinds(const uint32_t& modmask, const std::string&
     return found;
 }
 
-void CKeybindManager::shadowKeybinds() {
+void CKeybindManager::shadowKeybinds(const xkb_keysym_t& doesntHave, const int& doesntHaveCode) {
     // shadow disables keybinds after one has been triggered
 
     for (auto& k : m_lKeybinds) {
@@ -206,11 +249,21 @@ void CKeybindManager::shadowKeybinds() {
             if ((pk == KBKEY || pk == KBKEYUPPER)) {
                 shadow = true;
             }
+
+            if (pk == doesntHave && doesntHave != 0) {
+                shadow = false;
+                break;
+            }
         }
 
         for (auto& pk : m_dPressedKeycodes) {
-            if (pk == (unsigned int)k.keycode) {
+            if (pk == k.keycode) {
                 shadow = true;
+            }
+
+            if (pk == doesntHaveCode && doesntHaveCode != 0 && doesntHaveCode != -1) {
+                shadow = false;
+                break;
             }
         }
 

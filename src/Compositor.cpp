@@ -264,12 +264,6 @@ void CCompositor::startCompositor() {
 
     initAllSignals();
 
-    // Set some env vars so that Firefox is automatically in Wayland mode
-    // and QT apps too
-    // electron needs -- flags so we can't really set them here
-    setenv("QT_QPA_PLATFORM", "wayland", true);
-    setenv("MOZ_ENABLE_WAYLAND", "1", true);
-
     // Set XDG_CURRENT_DESKTOP to our compositor's name
     setenv("XDG_CURRENT_DESKTOP", "hyprland", true);
 
@@ -716,7 +710,7 @@ CWindow* CCompositor::getWindowForPopup(wlr_xdg_popup* popup) {
     return nullptr;
 }
 
-wlr_surface* CCompositor::vectorToLayerSurface(const Vector2D& pos, std::list<SLayerSurface*>* layerSurfaces, Vector2D* sCoords, SLayerSurface** ppLayerSurfaceFound) {
+wlr_surface* CCompositor::vectorToLayerSurface(const Vector2D& pos, std::vector<std::unique_ptr<SLayerSurface>>* layerSurfaces, Vector2D* sCoords, SLayerSurface** ppLayerSurfaceFound) {
     for (auto it = layerSurfaces->rbegin(); it != layerSurfaces->rend(); it++) {
         if ((*it)->fadingOut || !(*it)->layerSurface || ((*it)->layerSurface && !(*it)->layerSurface->mapped))
             continue;
@@ -724,7 +718,7 @@ wlr_surface* CCompositor::vectorToLayerSurface(const Vector2D& pos, std::list<SL
         const auto SURFACEAT = wlr_layer_surface_v1_surface_at((*it)->layerSurface, pos.x - (*it)->geometry.x, pos.y - (*it)->geometry.y, &sCoords->x, &sCoords->y);
 
         if (SURFACEAT) {
-            *ppLayerSurfaceFound = *it;
+            *ppLayerSurfaceFound = it->get();
             return SURFACEAT;
         }
     }
@@ -900,17 +894,17 @@ void CCompositor::cleanupFadingOut(const int& monid) {
             continue;
 
         if (ls->fadingOut && ls->readyToDelete && !ls->alpha.isBeingAnimated()) {
-            for (auto& m : m_vMonitors) {
-                for (auto& lsl : m->m_aLayerSurfaceLists) {
-                    lsl.remove(ls);
-                }
-            }
-
             g_pHyprOpenGL->m_mLayerFramebuffers[ls].release();
             g_pHyprOpenGL->m_mLayerFramebuffers.erase(ls);
             
-            delete ls;
             m_vSurfacesFadingOut.erase(std::remove(m_vSurfacesFadingOut.begin(), m_vSurfacesFadingOut.end(), ls));
+
+            for (auto& m : m_vMonitors) {
+                for (auto& lsl : m->m_aLayerSurfaceLists) {
+                    if (!lsl.empty() && std::find_if(lsl.begin(), lsl.end(), [&](std::unique_ptr<SLayerSurface>& other) { return other.get() == ls; }) != lsl.end())
+                        lsl.erase(std::remove_if(lsl.begin(), lsl.end(), [&](std::unique_ptr<SLayerSurface>& other) { return other.get() == ls; }));
+                }
+            }
 
             Debug::log(LOG, "Cleanup: destroyed a layersurface");
 
@@ -1279,8 +1273,14 @@ void CCompositor::moveWorkspaceToMonitor(CWorkspace* pWorkspace, SMonitor* pMoni
     pWorkspace->moveToMonitor(pMonitor->ID);
 
     for (auto& w : m_vWindows) {
-        if (w->m_iWorkspaceID == pWorkspace->m_iID)
+        if (w->m_iWorkspaceID == pWorkspace->m_iID) {
             w->m_iMonitorID = pMonitor->ID;
+
+            // additionally, move floating windows manually
+            if (w->m_bIsFloating && w->m_bIsMapped && !w->m_bHidden) {
+                w->m_vRealPosition = w->m_vRealPosition.vec() - POLDMON->vecPosition + pMonitor->vecPosition;
+            }
+        }
     }
 
     if (SWITCHINGISACTIVE) { // if it was active, preserve its' status. If it wasn't, don't.
